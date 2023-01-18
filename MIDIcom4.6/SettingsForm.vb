@@ -60,4 +60,5 @@ If you select to ignore DICOMs with blank IDs, the app will not attempt to anony
     Private Sub SettingsForm_Load(sender As Object, e As EventArgs) Handles Me.Load
         InfoBox.Text = descText
     End Sub
+
 End Class

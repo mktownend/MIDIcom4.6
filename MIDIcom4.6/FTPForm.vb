@@ -24,6 +24,7 @@ Public Class FTPForm
         Private fileSize As Long = 0
         Private curId As String = ""
         Private state As ProcessState = ProcessState.Inactive
+        Private ThreadOutput As String = ""
 
         Private field As New Object
 
@@ -52,6 +53,22 @@ Public Class FTPForm
         Sub SetProgress(uploaded As ULong)
             SyncLock field
                 progress = uploaded
+            End SyncLock
+        End Sub
+        Function GetAndClearThreadOutput() As String
+            SyncLock field
+                Dim threadO As String = ThreadOutput
+                ThreadOutput = ""
+                Return threadO
+            End SyncLock
+        End Function
+        Sub SetThreadOutput(output As String)
+            SyncLock field
+                If ThreadOutput = "" Then
+                    ThreadOutput = output
+                Else
+                    ThreadOutput &= vbCrLf & output
+                End If
             End SyncLock
         End Sub
         Function GetProgress() As ULong
@@ -121,7 +138,7 @@ Public Class FTPForm
 
         For i As Integer = 0 To folderList.Count - 1
             UploadListBox.Items.Add(Path.GetFileName(folderList(i)))
-            UploadListBox.SetItemChecked(i, True)
+            UploadListBox.SetItemChecked(i, False)
         Next
 
     End Sub
@@ -136,18 +153,57 @@ Public Class FTPForm
             UploadListBox.SetItemChecked(i, True)
         Next
     End Sub
+    Sub WriteFTPLog(input As String, Optional msg As Boolean = False)
+        Form1.LogTxt.AppendText(input & vbCrLf)
+        FTPBox.AppendText(input & vbCrLf)
+        If msg Then
+            MsgBox(input)
+        End If
+    End Sub
+    Public Function FormatBytes(ByVal BytesCaller As ULong) As String
+        Dim DoubleBytes As Double
+        Try
+            Select Case BytesCaller
+                Case Is >= 1099511627776
+                    DoubleBytes = CDbl(BytesCaller / 1099511627776) 'TB
+                    Return FormatNumber(DoubleBytes, 2) & " TB"
+                Case 1073741824 To 1099511627775
+                    DoubleBytes = CDbl(BytesCaller / 1073741824) 'GB
+                    Return FormatNumber(DoubleBytes, 2) & " GB"
+                Case 1048576 To 1073741823
+                    DoubleBytes = CDbl(BytesCaller / 1048576) 'MB
+                    Return FormatNumber(DoubleBytes, 2) & " MB"
+                Case 1024 To 1048575
+                    DoubleBytes = CDbl(BytesCaller / 1024) 'KB
+                    Return FormatNumber(DoubleBytes, 2) & " KB"
+                Case 0 To 1023
+                    DoubleBytes = BytesCaller ' bytes
+                    Return FormatNumber(DoubleBytes, 2) & " bytes"
+                Case Else
+                    Return ""
+            End Select
+        Catch
+            Return ""
+        End Try
+
+    End Function
 
     Sub CompressAndUploadFolders()
 
         Try
             If Directory.Exists(tempDirectory) Then
-                Directory.Delete(tempDirectory, True)
+                Try
+                    Directory.Delete(tempDirectory, True)
+                Catch ex As Exception
+                    ssh.SetThreadOutput("Could not clear temporary directory")
+                End Try
             End If
 
             For Each subjID As Integer In UploadListBox.CheckedIndices
 
                 If ssh.GetState = ProcessState.Closing Then
                     ThreadClose()
+                    ssh.SetThreadOutput("Upload aborted")
                     Exit Sub
                 End If
 
@@ -155,29 +211,54 @@ Public Class FTPForm
 
                 Dim inputDirectory As String = outputDirectory & "/" & UploadListBox.Items(subjID)
 
+                ssh.SetThreadOutput("Collating subject: " & UploadListBox.Items(subjID))
                 ssh.SetState(ProcessState.Collating, UploadListBox.Items(subjID))
+
+                Dim fileCount As Integer = 0
 
                 For Each accFolder As String In Directory.GetDirectories(inputDirectory)
                     Dim accSubFolder As String = Path.GetFileName(accFolder)
+                    ssh.SetThreadOutput("* Found accession: " & accSubFolder)
                     Directory.CreateDirectory(tempDirectory & "/" & accSubFolder)
-                    If File.Exists(inputDirectory & "/" & accFolder & "/report.txt") Then
-                        File.Copy(inputDirectory & "/" & accFolder & "/report.txt", tempDirectory & "/" & accSubFolder & "/report.txt")
+
+                    If File.Exists(accFolder & "/report.txt") Then
+                        File.Copy(accFolder & "/report.txt", tempDirectory & "/" & accSubFolder & "/report.txt", True)
+                        ssh.SetThreadOutput("* Report file found.")
                     End If
-                    For Each serFolder As String In Directory.GetDirectories(accFolder)
-                        Dim serSubFolder As String = Path.GetFileName(serFolder)
+
+                    Dim subDir = Directory.GetDirectories(accFolder)
+                    For f As Integer = 0 To subDir.Length - 1
+                        Dim serSubFolder As String = Path.GetFileName(subDir(f))
+                        Debug.WriteLine("* * Found series: " & serSubFolder)
+                        ssh.SetThreadOutput("* * Found series: " & serSubFolder)
                         Directory.CreateDirectory(tempDirectory & "/" & accSubFolder & "/" & serSubFolder)
-                        For Each dcmFile As String In Directory.GetFiles(serFolder, "*.DCM")
-                            Dim dcmHead As DicomFile = DicomFile.Open(dcmFile, FileReadOption.SkipLargeTags)
-                            If dcmHead.Dataset.Contains(DicomTag.PatientIdentityRemoved) AndAlso dcmHead.Dataset.GetString(DicomTag.PatientIdentityRemoved).ToUpper = "YES" Then
-                                File.Copy(dcmFile, tempDirectory & "/" & accSubFolder & "/" & serSubFolder & "/" & Path.GetFileName(dcmFile))
-                                If ssh.GetState = ProcessState.Closing Then
-                                    ThreadClose()
-                                    Exit Sub
-                                End If
+                        For Each dcmFile As String In Directory.GetFiles(subDir(f), "*.DCM")
+                            File.Copy(dcmFile, tempDirectory & "/" & accSubFolder & "/" & serSubFolder & "/" & Path.GetFileName(dcmFile))
+                            fileCount += 1
+
+                            If ssh.GetState = ProcessState.Closing Then
+                                ThreadClose()
+                                ssh.SetThreadOutput("Upload aborted")
+                                Exit Sub
                             End If
+
+                            'Dim dcmHead As DicomFile = DicomFile.Open(dcmFile, FileReadOption.SkipLargeTags)
+                            'If dcmHead.Dataset.Contains(DicomTag.PatientIdentityRemoved) AndAlso dcmHead.Dataset.GetString(DicomTag.PatientIdentityRemoved).ToUpper = "YES" Then
+                            '    File.Copy(dcmFile, tempDirectory & "/" & accSubFolder & "/" & serSubFolder & "/" & Path.GetFileName(dcmFile))
+                            '    If ssh.GetState = ProcessState.Closing Then
+                            '        ThreadClose()
+                            '        Exit Sub
+                            '    End If
+                            'End If
                         Next
                     Next
                 Next
+
+                If ssh.GetState = ProcessState.Closing Then
+                    ThreadClose()
+                    ssh.SetThreadOutput("Upload aborted")
+                    Exit Sub
+                End If
 
                 ssh.SetState(ProcessState.Compressing)
 
@@ -190,17 +271,31 @@ Public Class FTPForm
                     File.Delete(outputFile)
                 End If
 
+
+                If ssh.GetState = ProcessState.Closing Then
+                    ThreadClose()
+                    ssh.SetThreadOutput("Upload aborted")
+                    Exit Sub
+                End If
+
+                ssh.SetThreadOutput("* Compressing " & fileCount & " files...")
+
                 ZipFile.CreateFromDirectory(tempDirectory, outputFile)
+
+                ssh.SetThreadOutput("* Compressed size " & FormatBytes(New FileInfo(outputFile).Length))
 
                 Dim fs As New FileInfo(outputFile)
                 ssh.SetFileSize(fs.Length)
 
                 If ssh.GetState = ProcessState.Closing Then
                     ThreadClose()
+                    ssh.SetThreadOutput("Upload aborted")
                     Exit Sub
                 End If
 
                 ssh.SetState(ProcessState.Uploading)
+
+                ssh.SetThreadOutput("* Uploading...")
 
                 Try
                     UploadFile(outputFile, ssh.SFTPConnection)
@@ -212,17 +307,41 @@ Public Class FTPForm
                             MsgBox(ex.Message)
                     End Select
                     ' QuenchConnection()
+                    ssh.SetThreadOutput("Error: " & ex.Message)
                     ThreadClose()
+                    ssh.SetThreadOutput("Upload aborted")
+                    Return
+                End Try
+
+
+                File.WriteAllLines(outputFile & ".txt", {fs.Length.ToString, (DateAndTime.Now.Day.ToString & "/" & DateAndTime.Now.Month.ToString & ", " & DateAndTime.Now.Hour.ToString & ":" & DateAndTime.Now.Minute.ToString)})
+
+                Try
+                    UploadFile(outputFile & ".txt", ssh.SFTPConnection)
+                Catch ex As Exception
+                    Select Case ex.Message
+                        Case "Thread was being aborted."
+                        Case Else
+                            MsgBox(ex.Message)
+                    End Select
+                    ' QuenchConnection()
+                    ssh.SetThreadOutput("Error: " & ex.Message)
+                    ThreadClose()
+                    ssh.SetThreadOutput("Upload aborted")
                     Return
                 End Try
 
                 If ssh.GetState = ProcessState.Closing Then
                     ThreadClose()
+                    ssh.SetThreadOutput("Upload aborted")
                     Exit Sub
                 End If
 
+                ssh.SetThreadOutput("Upload completed")
+
                 If deleteBox.Checked Then
                     Directory.Delete(inputDirectory, True)
+                    ssh.SetThreadOutput("Input deleted")
                 End If
 
                 Directory.Delete(tempDirectory, True)
@@ -231,6 +350,7 @@ Public Class FTPForm
             Next
         Catch ex As Exception
             MsgBox(ex.Message)
+            ssh.SetThreadOutput("Error: " & ex.Message)
             ThreadClose()
             Exit Sub
         End Try
@@ -248,7 +368,7 @@ Public Class FTPForm
     End Sub
 
     Sub UploadFile(inputFile As String, ftp As SftpClient)
-        If File.Exists(inputFile) And ftp.IsConnected Then
+        If File.Exists(inputFile) And ftp.IsConnected And ssh.isWorking Then
             Using inputStream = File.Open(inputFile, FileMode.Open)
                 ftp.UploadFile(inputStream, Path.GetFileName(inputFile), AddressOf ssh.SetProgress)
             End Using
@@ -275,13 +395,21 @@ Public Class FTPForm
     'End Sub
 
     Sub QuenchConnection()
-        ssh.ResetWorkValues()
+        'ssh.ResetWorkValues()
         ssh.SetWorking(False)
         ssh.SetState(ProcessState.Closing)
+        'UpdateProgress()
+        'UpdateFolderList()
+        'ClearBar()
+        'ConnectBtn.Text = "Connect"
+        'UploadBtn.Text = "Upload"
+    End Sub
+
+    Sub ResetUI()
+        ssh.ResetWorkValues()
         UpdateProgress()
         UpdateFolderList()
         ClearBar()
-        'ConnectBtn.Text = "Connect"
         UploadBtn.Text = "Upload"
     End Sub
 
@@ -298,16 +426,26 @@ Public Class FTPForm
         Dim succesfulUploads = 0
         Try
             If ssh.isWorking Then
+                UploadBtn.Text = "Cancelling..."
                 QuenchConnection()
+                While ssh.uploadThread.IsAlive
+                    Application.DoEvents()
+                End While
+                UploadBtn.Text = "Upload"
+                ssh.ResetWorkValues()
+                UpdateBar()
+                UpdateProgress()
             Else
+                ssh.SetState(ProcessState.Inactive)
                 ssh.SetWorking(True)
                 UploadBtn.Text = "Cancel"
-
                 StateTxt.Text = "Connecting..."
+                WriteFTPLog("Connecting...")
 
                 Try
                     ssh.SFTPConnection = New SftpClient("sftp.isd.kcl.ac.uk", UserBox.Text, PassBox.Text)
                     ssh.SFTPConnection.Connect()
+                    WriteFTPLog("Connected: " & ssh.SFTPConnection.ConnectionInfo.CurrentServerEncryption)
                 Catch ex As Exception
                     MsgBox(ex.Message)
                     QuenchConnection()
@@ -316,13 +454,11 @@ Public Class FTPForm
 
                 Try
                     File.WriteAllText(credDir, Encrypt(UserBox.Text & "/" & PassBox.Text))
+                    WriteFTPLog("Credentials saved")
                 Catch ex As Exception
                 End Try
 
-                'updateLabel.Text = "Processing " & UploadListBox.Items(subjID) & "..."
-
                 ssh.uploadThread = New Thread(New ThreadStart(AddressOf CompressAndUploadFolders))
-
                 ssh.uploadThread.Start()
 
                 While ssh.isWorking()
@@ -331,22 +467,31 @@ Public Class FTPForm
                 End While
 
                 ssh.SFTPConnection.Disconnect()
-                MsgBox("Upload complete.")
+                'WriteFTPLog("Upload complete.")
+
+                ssh.ResetWorkValues()
+                QuenchConnection()
+                ResetUI()
 
             End If
 
         Catch ex As Exception
             MsgBox(ex.Message)
+            ssh.ResetWorkValues()
             QuenchConnection()
+            ResetUI()
             Return
         End Try
 
-        ssh.SetWorking(False)
-        QuenchConnection()
 
     End Sub
 
     Sub UpdateProgress()
+        Dim tOutput As String = ssh.GetAndClearThreadOutput()
+        If tOutput <> "" Then
+            WriteFTPLog(tOutput)
+            Debug.WriteLine("> " & tOutput)
+        End If
         If ssh.GetState = ProcessState.Inactive Then
             StateTxt.Text = "Inactive"
             IdTxt.Text = ""

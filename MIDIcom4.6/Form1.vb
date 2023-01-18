@@ -30,12 +30,11 @@ Public Class Form1
     Dim skippedNoID As Integer = 0
     Dim skippedUnknownID As Integer = 0
 
-    Dim scoutForReports As Integer = ReportScoutMode.SECTRA
     Dim curAccFolder As String = ""
     Dim accWithReports As New List(Of String)
 
     Enum ReportScoutMode
-        NOSCOUT = -1
+        NONE = -1
         SECTRA
         CARESTREAM
     End Enum
@@ -77,6 +76,7 @@ Public Class Form1
         Public reuseStudyID As Boolean = False
         Public saveTxt As Boolean = False
         Public backupFiles As Boolean = False
+        Public ScoutForReports As Integer = -1
 
         Public setDialog As New SettingsForm
 
@@ -108,6 +108,11 @@ Public Class Form1
                                     principalInv = configKeys.Last.Value
                                 Case "IDFORMAT"
                                     IDFormat = configKeys.Last.Value
+                                Case "SCOUT"
+                                    If configKeys.Last.Value = "SECTRA" Then : ScoutForReports = ReportScoutMode.SECTRA
+                                    ElseIf configKeys.Last.Value = "CARESTREAM" Then : ScoutForReports = ReportScoutMode.CARESTREAM
+                                    ElseIf configKeys.Last.Value = "NONE" Then : ScoutForReports = ReportScoutMode.NONE
+                                    End If
                                 Case "IGNORENOID"
                                     If configKeys.Last.Value = "TRUE" Then : ignoreNoID = True
                                     End If
@@ -150,11 +155,19 @@ Public Class Form1
                     ElseIf key.Contains("CENTRECODE") Then
                         configLines(l) = "CENTRECODE=" & centreCode.Trim.ToUpper
                     ElseIf key.Contains("SITENAME") Then
-                        configLines(l) = "SITENAME=" & sitename.Trim.ToUpper
+                        configLines(l) = "SITENAME=" & siteName.Trim.ToUpper
                     ElseIf key.Contains("PRINCIPALINV") Then
                         configLines(l) = "PRINCIPALINV=" & principalInv.Trim.ToUpper
                     ElseIf key.Contains("IDFORMAT") Then
                         configLines(l) = "IDFORMAT=" & IDFormat.Trim.ToUpper
+                    ElseIf key.Contains("SCOUT") Then
+                        If ScoutForReports = ReportScoutMode.SECTRA Then
+                            configLines(l) = "SCOUT=SECTRA"
+                        ElseIf ScoutForReports = ReportScoutMode.CARESTREAM Then
+                            configLines(l) = "SCOUT=CARESTREAM"
+                        ElseIf ScoutForReports = ReportScoutMode.NONE Then
+                            configLines(l) = "SCOUT=NONE"
+                        End If
                     ElseIf key.Contains("IGNORENOID") Then
                         If ignoreNoID Then
                             configLines(l) = "IGNORENOID=TRUE"
@@ -209,6 +222,9 @@ Public Class Form1
                 .REUSESTUDYIDbox.Checked = reuseStudyID
                 .IGNOREUNASSIGNEDbox.Checked = ignoreUnassigned
                 .IGNORENOIDbox.Checked = ignoreNoID
+
+                .ReportBox.SelectedIndex = ScoutForReports + 1
+
             End With
         End Sub
         Public Sub SaveDialogInfo()
@@ -226,6 +242,8 @@ Public Class Form1
                 reuseStudyID = .REUSESTUDYIDbox.Checked
                 ignoreUnassigned = .IGNOREUNASSIGNEDbox.Checked
                 ignoreNoID = .IGNORENOIDbox.Checked
+
+                ScoutForReports = .ReportBox.SelectedIndex - 1
             End With
         End Sub
         Public Sub SelectEnrolFile()
@@ -703,7 +721,7 @@ If you have any queries about these settings please contact the MIDI team"
 
                         If Not folderReportScouted And Not accWithReports.Contains(loggedAcc) Then
                             folderReportScouted = True
-                            Select Case scoutForReports
+                            Select Case cf.ScoutForReports
                                 Case ReportScoutMode.SECTRA
                                     Dim curFolder As String = Ip(folder)
                                     If curFolder.Contains("/DICOM/") Then
@@ -936,7 +954,7 @@ If you have any queries about these settings please contact the MIDI team"
 
                         If cellList(0) <> "" And cellList(3) <> "" AndAlso (IsNumeric(cellList(0)) Or cellList(0).Contains("_")) Then
                             If Not knownSubjects.ContainsKey(cellList(3).ToUpper) Then
-                                knownSubjects.Add(cellList(3).ToUpper, New Subject(cellList(3).ToUpper, cellList(0).Split({"_"c}).Last.ToUpper, cellList(1).ToUpper, cellList(2).ToUpper, cellList(5).ToUpper))
+                                knownSubjects.Add(cellList(3).ToUpper, New Subject(cellList(3).ToUpper.Trim, cellList(0).Split({"_"c}).Last.ToUpper, cellList(1).ToUpper, cellList(2).ToUpper, cellList(5).ToUpper))
                             End If
                         End If
 
@@ -987,7 +1005,9 @@ If you have any queries about these settings please contact the MIDI team"
         End If
         For Each iKey As String In knownSubjects.Keys
             With knownSubjects(iKey)
-                SubjectBox.Items.Add(.studyID.PadLeft(4) & ",  " & .initials.PadLeft(6) & ",  " & .nhsID.PadLeft(30))
+                If .nhsID.Trim <> "" Then
+                    SubjectBox.Items.Add(.studyID.PadLeft(4) & ",  " & .initials.PadLeft(6) & ",  " & .nhsID.PadLeft(30))
+                End If
             End With
         Next
     End Sub
