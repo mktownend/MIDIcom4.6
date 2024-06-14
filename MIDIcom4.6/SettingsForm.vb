@@ -1,5 +1,5 @@
 ﻿Public Class SettingsForm
-    Public descText As String = "MIDI Study DICOM Anonymiser Tool
+    Public descText As String = "MIDI Study DICOM Deidentifier Tool
 
 Produced by the MIDI Consortium
 
@@ -41,9 +41,9 @@ If you select to save to a .txt file, the app will write a plaintext .txt file v
         
 If you select to reuse skipped study IDs, the app will try to assign the lowest possible available study ID to any new subjects - ie, if IDs 0001, 0002, & 0004 are assigned to subjects, then the app will assign ID 0003. By default this is not used to avoid the possibility of different subjects sharing study IDs in the case of an error - the app will assign a study ID one higher than the highest previous ID, in this case, ID 0005.
 
-If you select to ignore DICOMs not already assigned IDs, the app will only anonymise files that match a known (ie, matching a subject in the enrolment log file) subject.
+If you select to ignore DICOMs not already assigned IDs, the app will only deidentify files that match a known (ie, matching a subject in the enrolment log file) subject.
 
-If you select to ignore DICOMs with blank IDs, the app will not attempt to anonymise these files. This is probably sensible, as if the ID is blank they cannot be reliably assigned to a given subject. Some PAC systems seem to generate these dummy files frequently for some reason, but they do not seem essential to reading the genuine images. 
+If you select to ignore DICOMs with blank IDs, the app will not attempt to deidentify these files. This is probably sensible, as if the ID is blank they cannot be reliably assigned to a given subject. Some PAC systems seem to generate these dummy files frequently for some reason, but they do not seem essential to reading the genuine images. 
 
 "
     End Sub
@@ -60,5 +60,4 @@ If you select to ignore DICOMs with blank IDs, the app will not attempt to anony
     Private Sub SettingsForm_Load(sender As Object, e As EventArgs) Handles Me.Load
         InfoBox.Text = descText
     End Sub
-
 End Class

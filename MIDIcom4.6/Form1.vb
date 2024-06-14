@@ -1,5 +1,6 @@
 ﻿Imports System
 Imports System.IO
+Imports System.IO.Compression
 Imports System.Diagnostics
 Imports Dicom
 Imports NPOI.XSSF.UserModel
@@ -18,7 +19,7 @@ Public Class Form1
     Dim baseDirectory As String = AppDomain.CurrentDomain.BaseDirectory()
     Dim configPath As String = AppDomain.CurrentDomain.BaseDirectory & "\Resources\config.txt"
 
-    Dim knownSubjects As New Dictionary(Of String, Subject)
+    Public knownSubjects As New Dictionary(Of String, Subject)
 
     Dim writeIDs As Boolean = True
 
@@ -32,6 +33,11 @@ Public Class Form1
 
     Dim curAccFolder As String = ""
     Dim accWithReports As New List(Of String)
+
+    Public logAccs As Boolean = True
+
+    Dim zip_object As New Object
+    Dim zip_active As Integer = 0
 
     Enum ReportScoutMode
         NONE = -1
@@ -60,7 +66,7 @@ Public Class Form1
     End Function
 
     Public Function OutputDirectoryString() As String
-        Return outputFolderDlg.SelectedPath & "/" & ReplaceInvalidChars(cf.studyCode) & "/" & ReplaceInvalidChars(cf.centreCode)
+        Return outputFolderDlg.SelectedPath & ReplaceInvalidChars(cf.studyCode) & "\" & ReplaceInvalidChars(cf.centreCode)
     End Function
 
     Public Class ConfigSettings
@@ -76,7 +82,6 @@ Public Class Form1
         Public reuseStudyID As Boolean = False
         Public saveTxt As Boolean = False
         Public backupFiles As Boolean = False
-        Public ScoutForReports As Integer = -1
 
         Public setDialog As New SettingsForm
 
@@ -108,11 +113,6 @@ Public Class Form1
                                     principalInv = configKeys.Last.Value
                                 Case "IDFORMAT"
                                     IDFormat = configKeys.Last.Value
-                                Case "SCOUT"
-                                    If configKeys.Last.Value = "SECTRA" Then : ScoutForReports = ReportScoutMode.SECTRA
-                                    ElseIf configKeys.Last.Value = "CARESTREAM" Then : ScoutForReports = ReportScoutMode.CARESTREAM
-                                    ElseIf configKeys.Last.Value = "NONE" Then : ScoutForReports = ReportScoutMode.NONE
-                                    End If
                                 Case "IGNORENOID"
                                     If configKeys.Last.Value = "TRUE" Then : ignoreNoID = True
                                     End If
@@ -160,14 +160,6 @@ Public Class Form1
                         configLines(l) = "PRINCIPALINV=" & principalInv.Trim.ToUpper
                     ElseIf key.Contains("IDFORMAT") Then
                         configLines(l) = "IDFORMAT=" & IDFormat.Trim.ToUpper
-                    ElseIf key.Contains("SCOUT") Then
-                        If ScoutForReports = ReportScoutMode.SECTRA Then
-                            configLines(l) = "SCOUT=SECTRA"
-                        ElseIf ScoutForReports = ReportScoutMode.CARESTREAM Then
-                            configLines(l) = "SCOUT=CARESTREAM"
-                        ElseIf ScoutForReports = ReportScoutMode.NONE Then
-                            configLines(l) = "SCOUT=NONE"
-                        End If
                     ElseIf key.Contains("IGNORENOID") Then
                         If ignoreNoID Then
                             configLines(l) = "IGNORENOID=TRUE"
@@ -222,9 +214,6 @@ Public Class Form1
                 .REUSESTUDYIDbox.Checked = reuseStudyID
                 .IGNOREUNASSIGNEDbox.Checked = ignoreUnassigned
                 .IGNORENOIDbox.Checked = ignoreNoID
-
-                .ReportBox.SelectedIndex = ScoutForReports + 1
-
             End With
         End Sub
         Public Sub SaveDialogInfo()
@@ -243,7 +232,6 @@ Public Class Form1
                 ignoreUnassigned = .IGNOREUNASSIGNEDbox.Checked
                 ignoreNoID = .IGNORENOIDbox.Checked
 
-                ScoutForReports = .ReportBox.SelectedIndex - 1
             End With
         End Sub
         Public Sub SelectEnrolFile()
@@ -254,13 +242,18 @@ Public Class Form1
             }
             If oFD.ShowDialog = DialogResult.OK Then
                 enrolFilePath = oFD.FileName
+
+                If enrolFilePath.Contains(AppDomain.CurrentDomain.BaseDirectory) Then
+                    enrolFilePath = enrolFilePath.Replace(AppDomain.CurrentDomain.BaseDirectory, ".\")
+                End If
+
                 If configKeys.Keys.Contains("ENROLFILEPATH") Then
                     configKeys("ENROLFILEPATH") = oFD.FileName
                 Else
                     configKeys.Add("ENROLFILEPATH", oFD.FileName)
                 End If
             Else
-                enrolFilePath = AppDomain.CurrentDomain.BaseDirectory & "Resources\KNOWNIDS.xlsx"
+                enrolFilePath = ".\Resources\enrolment_log.xlsx"
                 If configKeys.Keys.Contains("ENROLFILEPATH") Then
                     configKeys("ENROLFILEPATH") = enrolFilePath
                 Else
@@ -304,6 +297,7 @@ Public Class Form1
         Public initials As String
         Public birthDate As String
         Public imageDate As String
+        Public accs As Dictionary(Of String, Accession)
         Sub New(nhs As String, study As String, Optional ini As String = "NONE", Optional birth As String = "NONE", Optional image As String = "NONE")
             nhsID = nhs
             studyID = study
@@ -311,7 +305,10 @@ Public Class Form1
             initials = ini
             birthDate = birth
             imageDate = image
+
+            accs = New Dictionary(Of String, Accession)
         End Sub
+
         'Sub WriteID(idWriter As IO.StreamWriter)
         '    Try
         '        idWriter.WriteLine(nhsID & "," & studyID & "," & initials & "," & birthDate & "," & imageDate)
@@ -320,15 +317,53 @@ Public Class Form1
         '        Form1.WriteLog("Unable to save new subject ID pair!")
         '    End Try
         'End Sub
+        Public Function DcmImageDate() As String
+            Dim iD As Date
+            If imageDate.Length = 8 And IsNumeric(imageDate) Then
+                Return imageDate.Trim()
+            ElseIf (Date.TryParse(imageDate, iD)) Then
+                Return Str(iD.ToString("yyyyMMdd")).Trim()
+            Else
+                Return "19000101"
+            End If
+        End Function
     End Class
 
     Public Class Accession
         Public id As String
-        Public dcmPaths As New List(Of String)
-        Sub New(accID As String, paths() As String)
+        Public scan_date As String
+        Public series_descs As List(Of String)
+        Sub New(accID As String, sDate As String, descs() As String)
             id = accID
-            dcmPaths.AddRange(paths)
+            scan_date = sDate
+            series_descs = New List(Of String)
+            For Each desc In descs
+                If desc <> "" And Not series_descs.Contains(desc) Then
+                    series_descs.AddRange(descs)
+                End If
+            Next
         End Sub
+        Sub New(accID As String, sDate As String, desc As String)
+            id = accID
+            scan_date = sDate
+            series_descs = New List(Of String)
+            If desc <> "" Then
+                series_descs.Add(desc)
+            End If
+        End Sub
+        Sub New(accID As String, sDate As String)
+            id = accID
+            scan_date = sDate
+            series_descs = New List(Of String)
+        End Sub
+        Function Get_String() As String
+            Dim return_val As String = id & vbCrLf & scan_date
+            series_descs.Sort()
+            For Each desc In series_descs
+                return_val &= vbCrLf & vbTab & desc
+            Next
+            Return return_val
+        End Function
     End Class
 
     Public Sub CheckCreateDirectory(path As String)
@@ -341,8 +376,48 @@ Public Class Form1
         End Try
     End Sub
 
-    Public Sub AnonymiseDCMFile(ByRef dcmFile As DicomFile)
-        dcmFile.Dataset.Remove(DicomTag.PatientAddress)
+    Dim enhanced_profile = Dicom.DicomAnonymizer.SecurityProfile.LoadProfile(Nothing, DicomAnonymizer.SecurityProfileOptions.BasicProfile _
+                                                                             Or DicomAnonymizer.SecurityProfileOptions.RetainSafePrivate _
+                                                                             Or DicomAnonymizer.SecurityProfileOptions.RetainDeviceIdent _
+                                                                             Or DicomAnonymizer.SecurityProfileOptions.CleanDesc)
+    Dim enhanced_anonymiser = New Dicom.DicomAnonymizer(enhanced_profile)
+    Public Sub AnonymiseDCMFile(ByRef dcmFile As DicomFile, Optional patient_ID As String = "")
+
+        Dim accessionNumber As String = ""
+        Dim seriesNumber As String = ""
+        Dim patientWeight As String = ""
+        Dim patientAge As String = ""
+        Dim patientSex As String = ""
+        Dim seriesDesc As String = ""
+        Dim birthDate As String = ""
+        Dim scanDate As String = ""
+
+        dcmFile.Dataset.TryGetString(DicomTag.AccessionNumber, accessionNumber)
+        dcmFile.Dataset.TryGetString(DicomTag.SeriesNumber, seriesNumber)
+        dcmFile.Dataset.TryGetString(DicomTag.PatientWeight, patientWeight)
+        dcmFile.Dataset.TryGetString(DicomTag.PatientAge, patientAge)
+        dcmFile.Dataset.TryGetString(DicomTag.PatientSex, patientSex)
+        dcmFile.Dataset.TryGetString(DicomTag.SeriesDescription, seriesDesc)
+        dcmFile.Dataset.TryGetString(DicomTag.StudyDate, scanDate)
+        dcmFile.Dataset.TryGetString(DicomTag.PatientBirthDate, birthDate)
+
+        enhanced_anonymiser.AnonymizeInPlace(dcmFile)
+
+        dcmFile.Dataset.AddOrUpdate(DicomTag.AccessionNumber, accessionNumber)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.SeriesNumber, seriesNumber)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.PatientID, patient_ID)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.PatientWeight, patientWeight)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.PatientAge, patientAge)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.PatientSex, patientSex)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.SeriesDescription, seriesDesc)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.StudyDate, scanDate)
+        dcmFile.Dataset.AddOrUpdate(DicomTag.PatientBirthDate, birthDate)
+
+        dcmFile.Dataset.AddOrUpdate(DicomTag.StudyTime, "000000")
+        dcmFile.Dataset.AddOrUpdate(DicomTag.ReferringPhysicianName, "ANONYMOUS")
+        dcmFile.Dataset.AddOrUpdate(DicomTag.PatientName, "ANONYMOUS")
+        dcmFile.Dataset.AddOrUpdate(DicomTag.PatientAddress, "ANONYMOUS")
+
         dcmFile.Dataset.Remove(DicomTag.PatientAlternativeCalendar)
         dcmFile.Dataset.Remove(DicomTag.PatientBirthName)
         dcmFile.Dataset.Remove(DicomTag.PatientBirthTime)
@@ -353,13 +428,11 @@ Public Class Form1
         dcmFile.Dataset.Remove(DicomTag.PatientComments)
         dcmFile.Dataset.Remove(DicomTag.PatientDeathDateInAlternativeCalendar)
         dcmFile.Dataset.Remove(DicomTag.PatientEquipmentRelationshipCodeSequence)
-        dcmFile.Dataset.Remove(DicomTag.PatientID)
         dcmFile.Dataset.Remove(DicomTag.PatientInstitutionResidence)
         dcmFile.Dataset.Remove(DicomTag.PatientInsurancePlanCodeSequence)
         dcmFile.Dataset.Remove(DicomTag.PatientLocationCoordinatesCodeSequence)
         dcmFile.Dataset.Remove(DicomTag.PatientLocationCoordinatesSequence)
         dcmFile.Dataset.Remove(DicomTag.PatientMotherBirthName)
-        dcmFile.Dataset.Remove(DicomTag.PatientName)
         dcmFile.Dataset.Remove(DicomTag.PatientPrimaryLanguageCodeSequence)
         dcmFile.Dataset.Remove(DicomTag.PatientPrimaryLanguageModifierCodeSequence)
         dcmFile.Dataset.Remove(DicomTag.PatientReligiousPreference)
@@ -372,7 +445,6 @@ Public Class Form1
         dcmFile.Dataset.Remove(DicomTag.PatientSpeciesDescription)
         dcmFile.Dataset.Remove(DicomTag.PatientTelecomInformation)
         dcmFile.Dataset.Remove(DicomTag.PatientTelephoneNumbers)
-        dcmFile.Dataset.Remove(DicomTag.PatientWeight)
         dcmFile.Dataset.Remove(DicomTag.CurrentPatientLocation)
         dcmFile.Dataset.Remove(DicomTag.AdditionalPatientHistory)
         dcmFile.Dataset.Remove(DicomTag.GroupOfPatientsIdentificationSequence)
@@ -383,18 +455,20 @@ Public Class Form1
         dcmFile.Dataset.Remove(DicomTag.ResponsiblePerson)
         dcmFile.Dataset.Remove(DicomTag.ResponsiblePersonRole)
         dcmFile.Dataset.Remove(DicomTag.ConsultingPhysicianName)
-        dcmFile.Dataset.Remove(DicomTag.ReferringPhysicianName)
+
         dcmFile.Dataset.AddOrUpdate(DicomTag.PatientIdentityRemoved, "YES")
+
     End Sub
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
 
+        CheckCreateDirectory(baseDirectory & "Input\")
         CheckCreateDirectory(baseDirectory & "Output\")
         CheckCreateDirectory(baseDirectory & "Debug Logs\")
 
         inputFolderDlg = New FolderBrowserDialog With {
             .Description = "Select input directory to convert...",
-            .SelectedPath = baseDirectory & "Output\"
+            .SelectedPath = baseDirectory & "Input\"
         }
         outputFolderDlg = New FolderBrowserDialog With {
             .Description = "Select output directory for anonymised files...",
@@ -420,10 +494,10 @@ If you have any queries about these settings please contact the MIDI team"
 
         End If
 
-            cf.LoadFromTxt(configPath)
+        cf.LoadFromTxt(configPath)
 
         If firstLaunch Then
-            ShowSettingsDialog()
+            SettingsToolMenu()
         End If
 
         If File.Exists(cf.enrolFilePath) Then
@@ -455,54 +529,113 @@ If you have any queries about these settings please contact the MIDI team"
         WriteLog("***")
         SaveLog(DateAndTime.Now.Day & "_" & DateAndTime.Now.Month & "_" & "_" & DateAndTime.Now.Hour & "_" & DateAndTime.Now.Minute & "_" & DateAndTime.Now.Second)
     End Sub
+    Private Sub zip_folders()
+        Do
+            Dim folder_path As String = ""
+            SyncLock zip_object
+                If folders_to_zip.Count > 0 Then
+                    folder_path = folders_to_zip.First()
+                    folders_to_zip.RemoveAt(0)
+                ElseIf halt_zipping Then
+                    zip_active -= 1
+                    Return
+                End If
+            End SyncLock
 
+            If folder_path <> "" Then
+                Dim zip_path = folder_path
+                If zip_path.EndsWith("/") Or zip_path.EndsWith("\") Then
+                    zip_path = zip_path.Substring(0, zip_path.Length - 1)
+                End If
+                zip_path &= ".zip"
+
+                If Directory.Exists(folder_path) And Not File.Exists(zip_path) Then
+                    ZipFile.CreateFromDirectory(folder_path, zip_path)
+                End If
+
+                If File.Exists(zip_path) Then
+                    Try
+                        Directory.Delete(folder_path, True)
+                    Catch ex As Exception
+
+                    End Try
+                End If
+
+            End If
+
+            Threading.Thread.Sleep(300)
+        Loop
+    End Sub
     Private Sub ConvertBtn_Click(sender As Object, e As EventArgs) Handles ConvertBtn.Click
         If working = False Then
             skippedNoID = 0
             skippedUnknownID = 0
             totalAnonymised = 0
             totalFailed = 0
+
+            If zip_check.Checked = True Then
+                halt_zipping = False
+                If zip_check.Checked Then
+                    For t As Integer = 1 To num_zip_threads
+                        zipping_threads.Add(New Threading.Thread(AddressOf zip_folders))
+                        zipping_threads.Last.Start()
+                    Next
+                End If
+            End If
+
             If inputFolderDlg.SelectedPath = outputFolderDlg.SelectedPath Then
                 If inputFolderDlg.ShowDialog() = DialogResult.OK AndAlso inputFolderDlg.SelectedPath <> outputFolderDlg.SelectedPath Then
                     working = True
                     UpdateMainFormUI()
                     'LaunchStreamwriter()
-                    ProcessFolder("")
+                    ProcessFolder("", True)
                     'DisposeStreamwriter()
                     working = False
+                    SyncLock zip_object
+                        halt_zipping = True
+                    End SyncLock
                     UpdateMainFormUI()
 
                     WorkSummary()
-
                 End If
             Else
                 working = True
                 UpdateMainFormUI()
                 ConvertBtn.Text = "Stop"
                 'LaunchStreamwriter()
-                ProcessFolder("")
+                ProcessFolder("", True)
                 'DisposeStreamwriter()
                 working = False
+                SyncLock zip_object
+                    halt_zipping = True
+                End SyncLock
                 UpdateMainFormUI()
 
                 WorkSummary()
-
             End If
 
-            WriteExcelFile(cf.enrolFilePath)
-            If cf.saveTxt Then
-                WriteTxtFile(cf.enrolFilePath & ".txt")
-            End If
+            Save_Enrolment_Log()
 
         Else
             working = False
+            SyncLock zip_object
+                halt_zipping = True
+            End SyncLock
             UpdateMainFormUI()
 
             WorkSummary()
         End If
     End Sub
-
+    Public Sub Save_Enrolment_Log()
+        WriteExcelFile(cf.enrolFilePath)
+        If cf.saveTxt Then
+            WriteTxtFile(cf.enrolFilePath & ".txt")
+        End If
+    End Sub
     Public Sub WriteLog(input As String, Optional msg As Boolean = False)
+        If LogTxt.Enabled = False Then
+            LogTxt.Enabled = True
+        End If
         LogTxt.AppendText(input & vbCrLf)
         If msg Then
             MsgBox(input)
@@ -544,6 +677,7 @@ If you have any queries about these settings please contact the MIDI team"
         Dim dcmDate As String = "NODATE"
         Dim dcmName As String = ""
         Dim dcmInit As String = ""
+        Dim serDesc As String = ""
 
         If dcmFile.Dataset.Contains(DicomTag.PatientID) Then
             subjID = dcmFile.Dataset.GetString(DicomTag.PatientID).ToUpper
@@ -562,6 +696,9 @@ If you have any queries about these settings please contact the MIDI team"
             If serID = "" Then
                 serID = "NOSERID"
             End If
+        End If
+        If dcmFile.Dataset.Contains(DicomTag.SeriesDescription) Then
+            serDesc = dcmFile.Dataset.GetString(DicomTag.SeriesDescription).ToUpper
         End If
         If dcmFile.Dataset.Contains(DicomTag.PatientBirthDate) Then
             dcmBirth = dcmFile.Dataset.GetString(DicomTag.PatientBirthDate).ToUpper
@@ -603,7 +740,7 @@ If you have any queries about these settings please contact the MIDI team"
 
         Dim newSubjStudyID As String
 
-        WriteLog("sID: " & subjID)
+        WriteLog("Subject ID: " & subjID)
 
         If knownSubjects.ContainsKey(subjID) Then
             WriteLog("Found file with known subject ID " & subjID)
@@ -625,18 +762,40 @@ If you have any queries about these settings please contact the MIDI team"
                         .initials = dcmInit
                     End If
                 End If
+
+                If Not .accs.Keys.Contains(accID) Then
+                    .accs.Add(accID, New Accession(accID, dcmDate))
+                End If
+                If serDesc <> "" Then
+                    If Not .accs(accID).series_descs.Contains(serDesc) Then
+                        .accs(accID).series_descs.Add(serDesc)
+                    End If
+                End If
+
             End With
 
         Else
 
             WriteLog("Found file with unknown subject ID " & subjID)
 
-
             If Not cf.ignoreUnassigned Then
 
                 newSubjStudyID = NewStudyID()
 
                 knownSubjects.Add(subjID, New Subject(subjID, newSubjStudyID, dcmInit, dcmBirth, dcmDate))
+
+                With knownSubjects(subjID)
+
+                    If Not .accs.Keys.Contains(accID) Then
+                        .accs.Add(accID, New Accession(accID, dcmDate))
+                    End If
+                    If serDesc <> "" Then
+                        If Not .accs(accID).series_descs.Contains(serDesc) Then
+                            .accs(accID).series_descs.Add(serDesc)
+                        End If
+                    End If
+
+                End With
 
                 UpdateSubjectList()
 
@@ -648,8 +807,27 @@ If you have any queries about these settings please contact the MIDI team"
 
         End If
 
-        AnonymiseDCMFile(dcmFile)
+        'Dim difference_dict As New Dictionary(Of String, String)
+        'For Each item In dcmFile.Dataset
+        '    Dim str = ""
+        '    dcmFile.Dataset.TryGetString(item.Tag, str)
+        '    ''Debug.Print(item.Tag.DictionaryEntry.Name & ": " & str)
+        '    difference_dict.Add(item.ToString, str)
+        'Next
 
+        'Debug.Print("   ###   ")
+
+        AnonymiseDCMFile(dcmFile, subjID)
+
+        'For Each item In dcmFile.Dataset
+        '    Dim str = ""
+        '    dcmFile.Dataset.TryGetString(item.Tag, str)
+        '    If difference_dict.Keys.Contains(item.ToString) AndAlso difference_dict(item.ToString) <> str Then
+        '        Debug.Print(item.Tag.DictionaryEntry.Name & ": " & difference_dict(item.ToString) & " ==> " & str)
+        '    End If
+        'Next
+
+        dcmFile.Dataset.AddOrUpdate(DicomTag.AccessionNumber, accID)
         dcmFile.Dataset.AddOrUpdate(DicomTag.PatientID, cf.studyCode & "_" & cf.centreCode & "_" & newSubjStudyID)
 
         Dim subjFolder As String = outputFolderDlg.SelectedPath & "/" & ReplaceInvalidChars(cf.studyCode) & "/" & ReplaceInvalidChars(cf.centreCode) & "/" & ReplaceInvalidChars(newSubjStudyID)
@@ -666,14 +844,33 @@ If you have any queries about these settings please contact the MIDI team"
         dcmFile.Save(fileDest)
         totalAnonymised += 1
         WriteLog("***   Anonymised file copied to: " & fileDest)
+        If deleteBox.Checked Then
+            Try
+                IO.File.Delete(path)
+                WriteLog("***   Source file deleted.")
+            Catch ex As Exception
+                WriteLog("***   Source file could NOT be deleted.")
+            End Try
+        End If
 
         Return accID
     End Function
 
-    Sub ProcessFolder(folder As String)
+    Dim folders_to_zip As New List(Of String)
+    Dim halt_zipping As Boolean = True
+    Dim zipping_threads As New List(Of Threading.Thread)
+    Dim num_zip_threads As Integer = 4
 
-        If Directory.Exists(ip(folder)) Then
-            For Each subFolder As String In Directory.GetDirectories(ip(folder))
+    Sub ProcessFolder(folder As String, Optional top_level As Boolean = False)
+
+        If Directory.Exists(Ip(folder)) Then
+            Dim folder_count As Integer = 0
+            For Each subFolder As String In Directory.GetDirectories(Ip(folder))
+
+                If top_level Then
+                    folder_count += 1
+                    WriteLog(folder_count)
+                End If
 
                 If working = False Then
                     'DisposeStreamwriter()
@@ -685,6 +882,18 @@ If you have any queries about these settings please contact the MIDI team"
                 'WriteLog("Creating folder: " & folderName)
                 Application.DoEvents()
                 ProcessFolder(folder & "/" & folderName)
+
+                If top_level And zip_check.Checked Then
+                    WriteLog("Requesting .zip archive...")
+                    SyncLock zip_object
+                        folders_to_zip.Add(subFolder)
+                    End SyncLock
+                End If
+
+                If top_level And folder_count >= 25 Then
+                    folder_count = 0
+                    Save_Enrolment_Log()
+                End If
 
             Next
 
@@ -718,40 +927,32 @@ If you have any queries about these settings please contact the MIDI team"
                     End Try
 
                     Try
-
                         If Not folderReportScouted And Not accWithReports.Contains(loggedAcc) Then
                             folderReportScouted = True
-                            Select Case cf.ScoutForReports
-                                Case ReportScoutMode.SECTRA
-                                    Dim curFolder As String = Ip(folder)
-                                    If curFolder.Contains("/DICOM/") Then
-                                        Dim secParentFolder As String = curFolder.Remove(curFolder.IndexOf("/DICOM/"))
-                                        ' Dim secSubFolders As String = curFolder.Substring(curFolder.IndexOf("/DICOM/") + 8)
-                                        Dim serFolder As String = secParentFolder & "/REPORTS/"
-                                        If Directory.Exists(serFolder) AndAlso Directory.GetDirectories(serFolder).Length > 0 Then
-                                            Do
-                                                serFolder = Directory.GetDirectories(serFolder)(0)
-                                            Loop Until Directory.GetDirectories(serFolder).Length = 0
-                                            Dim textFiles As String() = Directory.GetFiles(serFolder, "*.TXT")
-                                            If textFiles.Length > 0 Then
-                                                Dim repText As String = IO.File.ReadAllText(textFiles(0))
-                                                IO.File.WriteAllText(curAccFolder & "/report.txt", repText)
-                                                accWithReports.Add(loggedAcc)
-                                                WriteLog("***   Report file copied to: " & curAccFolder & "/report.txt")
-                                            End If
-                                        End If
+                            Dim curFolder As String = Ip(folder)
+                            If curFolder.Contains("/DICOM/") Then
+                                Dim secParentFolder As String = curFolder.Remove(curFolder.IndexOf("/DICOM/"))
+                                ' Dim secSubFolders As String = curFolder.Substring(curFolder.IndexOf("/DICOM/") + 8)
+                                Dim serFolder As String = secParentFolder & "/REPORTS/"
+                                If Directory.Exists(serFolder) AndAlso Directory.GetDirectories(serFolder).Length > 0 Then
+                                    Do
+                                        serFolder = Directory.GetDirectories(serFolder)(0)
+                                    Loop Until Directory.GetDirectories(serFolder).Length = 0
+                                    Dim textFiles As String() = Directory.GetFiles(serFolder, "*.TXT")
+                                    If textFiles.Length > 0 Then
+                                        Dim repText As String = IO.File.ReadAllText(textFiles(0))
+                                        IO.File.WriteAllText(curAccFolder & "/report.txt", repText)
+                                        accWithReports.Add(loggedAcc)
+                                        WriteLog("***   Report file copied to: " & curAccFolder & "/report.txt")
                                     End If
-                            End Select
+                                End If
+                            End If
                         End If
 
                     Catch ex As Exception
                         WriteLog("***   Could not copy report file for: " & file)
                         WriteLog(ex.Message)
                     End Try
-
-
-
-
 
                 End If
             Next
@@ -765,11 +966,12 @@ If you have any queries about these settings please contact the MIDI team"
 
             Dim xl As XSSFWorkbook
             Dim studySheet As ISheet
+            Dim accSheet As ISheet
 
             If Not File.Exists(filepath) Then
                 cf.CreateEnrolFile(filepath)
             ElseIf cf.backupFiles Then
-                Dim bkFileName As String = filepath.Insert(filepath.LastIndexOf("."), "Old")
+                Dim bkFileName As String = filepath.Insert(filepath.LastIndexOf("."), "_old")
                 If File.Exists(bkFileName) Then
                     Try
                         File.Delete(bkFileName)
@@ -783,9 +985,7 @@ If you have any queries about these settings please contact the MIDI team"
                     Try
                         File.Copy(filepath, bkFileName)
                     Catch ex As Exception
-
                         MsgBox("Creating Excel backup failed. Is the file currently open in another process? Backup has not been created." & vbCrLf & vbCrLf & "Error message: " & vbCrLf & ex.ToString)
-
                     End Try
                 End If
             End If
@@ -794,23 +994,26 @@ If you have any queries about these settings please contact the MIDI team"
 
                 xl = New XSSFWorkbook(readStream)
 
-                Dim activeSheet = 0
+                Dim studySheetID = 0
+                Dim accSheetID = -1
                 For s As Integer = 0 To (xl.NumberOfSheets - 1)
-                    If xl.GetSheetName(s) = "Enrolment Log" Then
-                        activeSheet = s
+                    Dim sheetName As String = xl.GetSheetName(s)
+                    If sheetName = "Enrolment Log" Then
+                        studySheetID = s
+                    ElseIf sheetName = "Accession Log" Then
+                        accSheetID = s
                     End If
                 Next
 
-                studySheet = xl.GetSheetAt(activeSheet)
+                If accSheetID = -1 Then
+                    accSheet = xl.CreateSheet("Accession Log")
+                Else
+                    accSheet = xl.GetSheetAt(accSheetID)
+                End If
+
+                studySheet = xl.GetSheetAt(studySheetID)
 
             End Using
-
-            'Dim headerRow As IRow = studySheet.CreateRow(0)
-
-            'For h As Integer = 0 To saveHeader.Count - 1
-            '    headerRow.CreateCell(h)
-            '    headerRow.Cells(h).SetCellValue(saveHeader(h))
-            'Next
 
             studySheet.GetRow(2).Cells(2).SetCellValue(cf.siteName)
             studySheet.GetRow(3).Cells(2).SetCellValue(cf.principalInv)
@@ -823,12 +1026,6 @@ If you have any queries about these settings please contact the MIDI team"
 
                     Dim subjectRow As IRow
 
-                    'If (r + 6) <= studySheet.LastRowNum Then
-                    '    subjectRow = studySheet.GetRow(r + 6)
-                    'Else
-                    '    subjectRow = studySheet.CreateRow(r + 6)
-                    'End If
-
                     subjectRow = studySheet.CreateRow(r + 5)
 
                     For c As Integer = 0 To saveHeader.Count
@@ -840,6 +1037,20 @@ If you have any queries about these settings please contact the MIDI team"
                     subjectRow.Cells(2).SetCellValue(.birthDate)
                     subjectRow.Cells(3).SetCellValue(.nhsID)
                     subjectRow.Cells(5).SetCellValue(.imageDate)
+
+                    If logAccs And .accs.Count > 0 Then
+                        Dim accRow As IRow = accSheet.CreateRow(r)
+                        accRow.CreateCell(0)
+                        accRow.Cells(0).SetCellValue(cf.studyCode & "_" & cf.centreCode & "_" & .studyID)
+                        For a As Integer = 1 To .accs.Count
+                            Dim acc_str As String = .accs.ElementAt(a - 1).Value.Get_String()
+                            If acc_str.Length > 30000 Then
+                                acc_str = acc_str.Substring(0, 30000)
+                            End If
+                            accRow.CreateCell(a)
+                            accRow.Cells(a).SetCellValue(acc_str)
+                        Next
+                    End If
 
                 End With
 
@@ -951,13 +1162,12 @@ If you have any queries about these settings please contact the MIDI team"
                     Next
 
                     If reportRow.Cells.Count > 5 Then
-
                         If cellList(0) <> "" And cellList(3) <> "" AndAlso (IsNumeric(cellList(0)) Or cellList(0).Contains("_")) Then
-                            If Not knownSubjects.ContainsKey(cellList(3).ToUpper) Then
-                                knownSubjects.Add(cellList(3).ToUpper, New Subject(cellList(3).ToUpper.Trim, cellList(0).Split({"_"c}).Last.ToUpper, cellList(1).ToUpper, cellList(2).ToUpper, cellList(5).ToUpper))
+                            If Not knownSubjects.ContainsKey(cellList(3)) Then
+                                knownSubjects.Add(cellList(3).Trim.ToUpper, New Subject(cellList(3).Trim.ToUpper, cellList(0).Split({"_"c}).Last.ToUpper, cellList(1).ToUpper, cellList(2).ToUpper, cellList(5).ToUpper))
+                                Debug.Print("New image date: " & knownSubjects.Last.Value.DcmImageDate())
                             End If
                         End If
-
                     End If
 
                 Next
@@ -971,33 +1181,6 @@ If you have any queries about these settings please contact the MIDI team"
         End Try
 
     End Sub
-
-    Private Sub AboutToolStripMenuItem_Click(sender As Object, e As EventArgs)
-        MessageBox.Show("This software was developed by Dr M Townend to enable easy data collection for the MIDI Study. Testing & development was helpfully assisted by James Ledger. Please contact me via matthew.townend@wwl.nhs.uk with any issues.", "MIDI Study DICOM Anonymiser V0.51")
-    End Sub
-
-    Private Sub ExportExcel(sender As Object, e As EventArgs) Handles ExportExcelBar.Click
-        outputFileDlg.Filter = "Excel file|*.xlsx"
-        outputFileDlg.Title = "Select output file..."
-        If outputFileDlg.ShowDialog = DialogResult.OK Then
-            Try
-                WriteExcelFile(outputFileDlg.FileName)
-            Catch ex As Exception
-                WriteLog(ex.Message, True)
-            End Try
-        End If
-    End Sub
-    Private Sub ExportTxt(sender As Object, e As EventArgs) Handles ExportTxtBar.Click
-        outputFileDlg.Filter = "Txt file|*.txt"
-        outputFileDlg.Title = "Select output file..."
-        If outputFileDlg.ShowDialog = DialogResult.OK Then
-            Try
-                WriteTxtFile(outputFileDlg.FileName)
-            Catch ex As Exception
-                WriteLog(ex.Message, True)
-            End Try
-        End If
-    End Sub
     Public Sub UpdateSubjectList()
         SubjectBox.Items.Clear()
         If knownSubjects.Keys.Count = 0 Then
@@ -1006,7 +1189,7 @@ If you have any queries about these settings please contact the MIDI team"
         For Each iKey As String In knownSubjects.Keys
             With knownSubjects(iKey)
                 If .nhsID.Trim <> "" Then
-                    SubjectBox.Items.Add(.studyID.PadLeft(4) & ",  " & .initials.PadLeft(6) & ",  " & .nhsID.PadLeft(30))
+                    SubjectBox.Items.Add(.studyID.PadLeft(4) & ",  " & .initials.PadLeft(6) & ",  " & .nhsID.PadLeft(24))
                 End If
             End With
         Next
@@ -1019,6 +1202,8 @@ If you have any queries about these settings please contact the MIDI team"
             InputFolderTxt.Text = "Not selected"
         End If
 
+        check_zip_threads()
+
         OutputFolderTxt.Text = outputFolderDlg.SelectedPath
         EnrolLogTxt.Text = cf.enrolFilePath
 
@@ -1030,17 +1215,9 @@ If you have any queries about these settings please contact the MIDI team"
         If working Then
             ConvertBtn.Text = "Stop"
         Else
-            ConvertBtn.Text = "Anonymise"
+            ConvertBtn.Text = "Deidentify"
         End If
 
-    End Sub
-
-    Private Sub ShowSettingsDialog() Handles SettingsToolStripMenuItem.Click
-        cf.SetDialogInfo()
-        If cf.setDialog.ShowDialog = DialogResult.OK Then
-            cf.SaveDialogInfo()
-            cf.SaveToTxt(configPath)
-        End If
     End Sub
 
     Private Sub EnrolFileBtn_Click(sender As Object, e As EventArgs) Handles EnrolFileBtn.Click
@@ -1057,7 +1234,7 @@ If you have any queries about these settings please contact the MIDI team"
     End Sub
 
     Private Sub SubjectBox_DoubleClick(sender As Object, e As EventArgs) Handles SubjectBox.DoubleClick
-        If SubjectBox.SelectedIndex >= 0 Then
+        If SubjectBox.SelectedIndex >= 0 AndAlso SubjectBox.SelectedIndex < knownSubjects.Count Then
             Dim subjOutputPath As String = outputFolderDlg.SelectedPath & cf.studyCode & "\" & cf.centreCode & "\" & knownSubjects(knownSubjects.Keys(SubjectBox.SelectedIndex)).studyID
             If IO.Directory.Exists(subjOutputPath) Then
                 Process.Start("explorer.exe", subjOutputPath)
@@ -1076,4 +1253,71 @@ If you have any queries about these settings please contact the MIDI team"
 
     End Sub
 
+    Private Sub SettingsToolMenu() Handles SettingsToolStripMenuItem1.Click
+        cf.SetDialogInfo()
+        If cf.setDialog.ShowDialog = DialogResult.OK Then
+            cf.SaveDialogInfo()
+            cf.SaveToTxt(configPath)
+        End If
+    End Sub
+
+    Private Sub ExportExcel(sender As Object, e As EventArgs) Handles AsExcelxlsxToolStripMenuItem.Click
+        outputFileDlg.Filter = "Excel file|*.xlsx"
+        outputFileDlg.Title = "Select output file..."
+        If outputFileDlg.ShowDialog = DialogResult.OK Then
+            Try
+                WriteExcelFile(outputFileDlg.FileName)
+            Catch ex As Exception
+                WriteLog(ex.Message, True)
+            End Try
+        End If
+    End Sub
+    Private Sub ExportTxt(sender As Object, e As EventArgs) Handles AsTexttxtToolStripMenuItem.Click
+        outputFileDlg.Filter = "Txt file|*.txt"
+        outputFileDlg.Title = "Select output file..."
+        If outputFileDlg.ShowDialog = DialogResult.OK Then
+            Try
+                WriteTxtFile(outputFileDlg.FileName)
+            Catch ex As Exception
+                WriteLog(ex.Message, True)
+            End Try
+        End If
+    End Sub
+
+    Private Sub AddReportsToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles AddReportsToolStripMenuItem.Click
+        Dim reportForm As New ReportForm
+
+        reportForm.ShowDialog()
+
+    End Sub
+
+    Private Sub InputExplBtn_Click(sender As Object, e As EventArgs) Handles InputExplBtn.Click
+        If IO.Directory.Exists(InputFolderTxt.Text) Then
+            Process.Start("explorer.exe", InputFolderTxt.Text)
+        End If
+    End Sub
+
+    Private Sub OutputExplBtn_Click(sender As Object, e As EventArgs) Handles OutputExplBtn.Click
+        If IO.Directory.Exists(OutputFolderTxt.Text) Then
+            Process.Start("explorer.exe", OutputFolderTxt.Text)
+        End If
+    End Sub
+
+    Private Sub MIDIQueryToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles MIDIQueryToolStripMenuItem.Click
+        QueryForm.Show()
+    End Sub
+
+    Private Sub ui_timer_Tick(sender As Object, e As EventArgs) Handles ui_timer.Tick
+        check_zip_threads()
+    End Sub
+    Sub check_zip_threads()
+        zip_lbl.Visible = False
+        ui_timer.Enabled = False
+        For Each thread In zipping_threads
+            If thread.IsAlive = True Then
+                zip_lbl.Visible = True
+                ui_timer.Enabled = True
+            End If
+        Next
+    End Sub
 End Class

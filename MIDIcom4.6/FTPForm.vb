@@ -134,12 +134,15 @@ Public Class FTPForm
 
     Sub UpdateFolderList()
         UploadListBox.Items.Clear()
-        Dim folderList As String() = Directory.GetDirectories(outputDirectory)
 
-        For i As Integer = 0 To folderList.Count - 1
-            UploadListBox.Items.Add(Path.GetFileName(folderList(i)))
-            UploadListBox.SetItemChecked(i, False)
-        Next
+        If Directory.Exists(outputDirectory) Then
+            Dim folderList As String() = Directory.GetDirectories(outputDirectory)
+
+            For i As Integer = 0 To folderList.Count - 1
+                UploadListBox.Items.Add(Path.GetFileName(folderList(i)))
+                UploadListBox.SetItemChecked(i, False)
+            Next
+        End If
 
     End Sub
 
@@ -153,7 +156,7 @@ Public Class FTPForm
             UploadListBox.SetItemChecked(i, True)
         Next
     End Sub
-    Sub WriteFTPLog(input As String, Optional msg As Boolean = False)
+    Public Sub WriteFTPLog(input As String, Optional msg As Boolean = False)
         Form1.LogTxt.AppendText(input & vbCrLf)
         FTPBox.AppendText(input & vbCrLf)
         If msg Then
@@ -216,15 +219,24 @@ Public Class FTPForm
 
                 Dim fileCount As Integer = 0
 
+                For Each txtFile As String In Directory.GetFiles(inputDirectory, "*.txt")
+                    File.Copy(txtFile, tempDirectory & "/" & Path.GetFileName(txtFile), True)
+                    ssh.SetThreadOutput("* Text file found.")
+                Next
+
                 For Each accFolder As String In Directory.GetDirectories(inputDirectory)
                     Dim accSubFolder As String = Path.GetFileName(accFolder)
                     ssh.SetThreadOutput("* Found accession: " & accSubFolder)
                     Directory.CreateDirectory(tempDirectory & "/" & accSubFolder)
 
-                    If File.Exists(accFolder & "/report.txt") Then
-                        File.Copy(accFolder & "/report.txt", tempDirectory & "/" & accSubFolder & "/report.txt", True)
-                        ssh.SetThreadOutput("* Report file found.")
-                    End If
+                    For Each txtFile As String In Directory.GetFiles(accFolder, "*.txt")
+                        File.Copy(txtFile, tempDirectory & accSubFolder & "/" & Path.GetFileName(txtFile), True)
+                        ssh.SetThreadOutput("* Text file found.")
+                    Next
+                    'If File.Exists(accFolder & "/report.txt") Then
+                    '    File.Copy(accFolder & "/report.txt", tempDirectory & "/" & accSubFolder & "/report.txt", True)
+                    '    ssh.SetThreadOutput("* Report file found.")
+                    'End If
 
                     Dim subDir = Directory.GetDirectories(accFolder)
                     For f As Integer = 0 To subDir.Length - 1
@@ -313,7 +325,6 @@ Public Class FTPForm
                     Return
                 End Try
 
-
                 File.WriteAllLines(outputFile & ".txt", {fs.Length.ToString, (DateAndTime.Now.Day.ToString & "/" & DateAndTime.Now.Month.ToString & ", " & DateAndTime.Now.Hour.ToString & ":" & DateAndTime.Now.Minute.ToString)})
 
                 Try
@@ -337,7 +348,7 @@ Public Class FTPForm
                     Exit Sub
                 End If
 
-                ssh.SetThreadOutput("Upload completed")
+                ssh.SetThreadOutput(outputFile & " uploaded")
 
                 If deleteBox.Checked Then
                     Directory.Delete(inputDirectory, True)
@@ -436,42 +447,46 @@ Public Class FTPForm
                 UpdateBar()
                 UpdateProgress()
             Else
-                ssh.SetState(ProcessState.Inactive)
-                ssh.SetWorking(True)
-                UploadBtn.Text = "Cancel"
-                StateTxt.Text = "Connecting..."
-                WriteFTPLog("Connecting...")
+                If UploadListBox.CheckedIndices.Count = 0 Then
+                    WriteFTPLog("No subjects selected for upload!")
+                Else
+                    ssh.SetState(ProcessState.Inactive)
+                    ssh.SetWorking(True)
+                    UploadBtn.Text = "Cancel"
+                    StateTxt.Text = "Connecting..."
+                    WriteFTPLog("Connecting...")
 
-                Try
-                    ssh.SFTPConnection = New SftpClient("sftp.isd.kcl.ac.uk", UserBox.Text, PassBox.Text)
-                    ssh.SFTPConnection.Connect()
-                    WriteFTPLog("Connected: " & ssh.SFTPConnection.ConnectionInfo.CurrentServerEncryption)
-                Catch ex As Exception
-                    MsgBox(ex.Message)
+                    Try
+                        ssh.SFTPConnection = New SftpClient("sftp.isd.kcl.ac.uk", UserBox.Text, PassBox.Text)
+                        ssh.SFTPConnection.Connect()
+                        WriteFTPLog("Connected: " & ssh.SFTPConnection.ConnectionInfo.CurrentServerEncryption)
+                    Catch ex As Exception
+                        MsgBox(ex.Message)
+                        QuenchConnection()
+                        Return
+                    End Try
+
+                    Try
+                        File.WriteAllText(credDir, Encrypt(UserBox.Text & "/" & PassBox.Text))
+                        WriteFTPLog("Credentials saved")
+                    Catch ex As Exception
+                    End Try
+
+                    ssh.uploadThread = New Thread(New ThreadStart(AddressOf CompressAndUploadFolders))
+                    ssh.uploadThread.Start()
+
+                    While ssh.isWorking()
+                        UpdateProgress()
+                        Application.DoEvents()
+                    End While
+
+                    ssh.SFTPConnection.Disconnect()
+                    'WriteFTPLog("Upload complete.")
+
+                    ssh.ResetWorkValues()
                     QuenchConnection()
-                    Return
-                End Try
-
-                Try
-                    File.WriteAllText(credDir, Encrypt(UserBox.Text & "/" & PassBox.Text))
-                    WriteFTPLog("Credentials saved")
-                Catch ex As Exception
-                End Try
-
-                ssh.uploadThread = New Thread(New ThreadStart(AddressOf CompressAndUploadFolders))
-                ssh.uploadThread.Start()
-
-                While ssh.isWorking()
-                    UpdateProgress()
-                    Application.DoEvents()
-                End While
-
-                ssh.SFTPConnection.Disconnect()
-                'WriteFTPLog("Upload complete.")
-
-                ssh.ResetWorkValues()
-                QuenchConnection()
-                ResetUI()
+                    ResetUI()
+                End If
 
             End If
 
