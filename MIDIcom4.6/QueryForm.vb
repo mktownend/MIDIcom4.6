@@ -138,24 +138,24 @@ Public Class QueryForm
             Log_String("Response has dataset...")
             If debugEnab Then
                 Log_String("C-FIND Request:")
-                For Each item In rq.Dataset
-                    If Debug_Enabled() Then
+                If Debug_Enabled() Then
+                    For Each item In rq.Dataset
                         Dim tag_value As String = ""
                         rq.Dataset.TryGetString(item.Tag, tag_value)
                         Log_String("   " & item.Tag.DictionaryEntry.Name & ": " & tag_value)
-                    End If
-                Next
+                    Next
+                End If
 
                 Log_String("")
                 Log_String("C-FIND Response:")
                 Try
-                    For Each item In rp.Dataset
-                        If Debug_Enabled() Then
+                    If Debug_Enabled() Then
+                        For Each item In rp.Dataset
                             Dim tag_value As String = ""
                             rp.Dataset.TryGetString(item.Tag, tag_value)
                             Log_String("   " & item.Tag.DictionaryEntry.Name & ": " & tag_value)
-                        End If
-                    Next
+                        Next
+                    End If
                 Catch ex As Exception
                     Log_String(ex.Message)
                 End Try
@@ -185,13 +185,18 @@ Public Class QueryForm
                 For Each study In study_list
                     If study.study_uid = s_uid Then
                         known_uid = True
+                        Exit For
                     End If
                 Next
 
-                Dim new_study As New ServerStudy(p_id, s_id, s_acc, s_uid, s_desc, s_num, s_date)
-                study_list.Add(new_study)
-                Log_String("Study added to study list...")
-                ui_update = True
+                If Not known_uid Then
+                    Dim new_study As New ServerStudy(p_id, s_id, s_acc, s_uid, s_desc, s_num, s_date)
+                    study_list.Add(new_study)
+                    Log_String("Study added to study list...")
+                    ui_update = True
+                ElseIf debugEnab Then
+                    Log_String("Duplicate study UID ignored: " & s_uid)
+                End If
             End SyncLock
 
             Log_String("")
@@ -402,6 +407,7 @@ Public Class QueryForm
         For s As Integer = 0 To study_list.Count - 1
             If StudyView.Rows(s).Cells(0).Value = True Then
                 Dim cmove = New DicomCMoveRequest(local_AEtitle, StudyView.Rows(s).Cells("StudyUID").Value)
+
                 cmove.Dataset.AddOrUpdate(DicomTag.QueryRetrieveLevel, "STUDY")
                 cmove.OnResponseReceived = AddressOf Cmove_Response
                 client.AddRequestAsync(cmove)

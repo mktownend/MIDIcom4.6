@@ -339,7 +339,7 @@ Public Class Form1
             series_descs = New List(Of String)
             For Each desc In descs
                 If desc <> "" And Not series_descs.Contains(desc) Then
-                    series_descs.AddRange(descs)
+                    series_descs.Add(desc)
                 End If
             Next
         End Sub
@@ -1156,6 +1156,10 @@ If you have any queries about these settings please contact the MIDI team"
 
                 For row As Integer = 6 To reportSheet.LastRowNum
                     Dim reportRow As IRow = reportSheet.GetRow(row)
+                    If reportRow Is Nothing Then
+                        Continue For
+                    End If
+
                     Dim cellList As New List(Of String)
                     For c As Integer = 0 To 5
                         cellList.Add(reportRow.GetCell(c, MissingCellPolicy.CREATE_NULL_AS_BLANK).ToString)
@@ -1235,7 +1239,10 @@ If you have any queries about these settings please contact the MIDI team"
 
     Private Sub SubjectBox_DoubleClick(sender As Object, e As EventArgs) Handles SubjectBox.DoubleClick
         If SubjectBox.SelectedIndex >= 0 AndAlso SubjectBox.SelectedIndex < knownSubjects.Count Then
-            Dim subjOutputPath As String = outputFolderDlg.SelectedPath & cf.studyCode & "\" & cf.centreCode & "\" & knownSubjects(knownSubjects.Keys(SubjectBox.SelectedIndex)).studyID
+            Dim subjOutputPath As String = Path.Combine(outputFolderDlg.SelectedPath,
+                                                    cf.studyCode,
+                                                    cf.centreCode,
+                                                    knownSubjects(knownSubjects.Keys(SubjectBox.SelectedIndex)).studyID)
             If IO.Directory.Exists(subjOutputPath) Then
                 Process.Start("explorer.exe", subjOutputPath)
             End If
